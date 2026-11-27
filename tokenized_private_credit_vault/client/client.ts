@@ -1,7 +1,8 @@
 // Client for Solana Playground
 // Tokenized Private Credit Vault + Covenant Monitor
 //
-// This client is aligned with the upgraded lib.rs.
+// Simulated-accounting demo for the modular Anchor MVP.
+// All 20 Rust files must be built together; advanced research helpers are not public instructions.
 //
 // It has two modes:
 //
@@ -201,6 +202,12 @@ async function main() {
   // Determine run mode
   // ---------------------------------------------------------------------------
   const runMode = await getRunMode();
+  console.log("SIMULATED ledger only: no real SPL assets or verified investor eligibility.");
+  if (runMode === "live") {
+    const requiredMethods = ["initializeFacility", "activateFacility", "updateFacilityMetadata", "depositCapital", "borrowerDrawdown", "accrueInterest", "updateCovenantState", "togglePik", "capitalizePik", "updateCollateralStatus", "makeRepayment", "requestRedemption", "cancelRedemption", "processRedemption", "freezeInvestorPosition", "markMatured", "closeFacility", "appendEventLog"];
+    const missing = requiredMethods.filter((name) => !methodExists(name));
+    if (missing.length) throw new Error(`Stale IDL; rebuild the modular program. Missing: ${missing.join(", ")}`);
+  }
 
   // ---------------------------------------------------------------------------
   // Demo values
@@ -455,7 +462,8 @@ async function main() {
 
   // ---------------------------------------------------------------------------
   // 10. make_repayment
-  // Repays the 1,000 drawdown + 25 capitalized PIK principal.
+  // Repay principal first; the program accrues interest against the old principal.
+  // Once principal reaches zero, read and settle the actual remaining interest.
   // ---------------------------------------------------------------------------
   if (
     !(await sendOrDry("makeRepayment", "makeRepayment", eventIndex, () =>
@@ -464,7 +472,7 @@ async function main() {
           repaymentAmount,
           principalPortion,
           interestPortion,
-          true,
+          false, // no verified contractual schedule satisfaction
           new BN(eventIndex)
         )
         .accounts({
@@ -478,6 +486,30 @@ async function main() {
     ))
   ) return;
   eventIndex++;
+
+  // Pay the remaining interest from on-chain evidence, not a guessed amount.
+  // In dry-run mode this is a conditional step; no account fetch or transaction.
+  if (runMode === "dry-run") {
+    console.log("[dry-run] Conditional interest-only repayment if accruedInterest > 0 after principal repayment.");
+    console.log("[dry-run] Subsequent event indexes assume this optional step is omitted.");
+  } else {
+    const debt = await program.account.facility.fetch(facilityPda);
+    if (!debt.outstandingPrincipal.isZero()) throw new Error("Principal settlement incomplete");
+    if (!debt.totalPikAccrued.isZero()) throw new Error("Uncapitalized PIK remains");
+    if (!debt.accruedInterest.isZero()) {
+      const interest = debt.accruedInterest;
+      if (!(await sendOrDry("settleAccruedInterest", "makeRepayment", eventIndex, () =>
+        program.methods.makeRepayment(interest, new BN(0), interest, false, new BN(eventIndex))
+          .accounts({ borrower, facility: facilityPda, repaymentSchedule: repaymentSchedulePda,
+            eventLog: eventLogPda(eventIndex), systemProgram: web3.SystemProgram.programId }).rpc()
+      ))) return;
+      eventIndex++;
+    }
+    const settled = await program.account.facility.fetch(facilityPda);
+    if (!settled.outstandingPrincipal.isZero() || !settled.accruedInterest.isZero() || !settled.totalPikAccrued.isZero()) {
+      throw new Error("Recorded obligations remain; refusing to close");
+    }
+  }
 
   // ---------------------------------------------------------------------------
   // 11. request_redemption
@@ -562,9 +594,31 @@ async function main() {
   ) return;
   eventIndex++;
 
+  // Settle remaining fixed-price shares before demonstrating a freeze/closure.
+  // This avoids leaving known investor claims outstanding in the happy-path demo.
+  const remainingShares = depositAmount.sub(secondRedemptionAmount);
+  if (runMode === "live") {
+    const position = await program.account.investorPosition.fetch(investorPositionPda);
+    if (!position.shareBalance.eq(remainingShares)) throw new Error("Unexpected share balance");
+  }
+  if (!(await sendOrDry("requestFinalRedemption", "requestRedemption", eventIndex, () =>
+    program.methods.requestRedemption(remainingShares, new BN(eventIndex))
+      .accounts({ investor, facility: facilityPda, investorPosition: investorPositionPda,
+        redemptionRequest: redemptionRequestPda, eventLog: eventLogPda(eventIndex),
+        systemProgram: web3.SystemProgram.programId }).rpc()
+  ))) return;
+  eventIndex++;
+  if (!(await sendOrDry("processFinalRedemption", "processRedemption", eventIndex, () =>
+    program.methods.processRedemption(remainingShares, new BN(eventIndex))
+      .accounts({ operator, investor, facility: facilityPda, investorPosition: investorPositionPda,
+        redemptionRequest: redemptionRequestPda, eventLog: eventLogPda(eventIndex),
+        systemProgram: web3.SystemProgram.programId }).rpc()
+  ))) return;
+  eventIndex++;
+
   // ---------------------------------------------------------------------------
   // 15. freeze_investor_position
-  // Demonstrates compliance-style freeze controls after redemption processing.
+  // Demonstrates simulated position status controls after all shares are redeemed.
   // ---------------------------------------------------------------------------
   if (
     !(await sendOrDry("freezeInvestorPosition", "freezeInvestorPosition", eventIndex, () =>
@@ -603,6 +657,22 @@ async function main() {
     ))
   ) return;
   eventIndex++;
+
+  if (!(await sendOrDry("appendAdministrativeNote", "appendEventLog", eventIndex, () =>
+    program.methods.appendEventLog(new BN(eventIndex), { administrativeNote: {} }, new BN(0), 1)
+      .accounts({ operator, facility: facilityPda, eventLog: eventLogPda(eventIndex),
+        systemProgram: web3.SystemProgram.programId }).rpc()
+  ))) return;
+  eventIndex++;
+
+  if (runMode === "live") {
+    const f = await program.account.facility.fetch(facilityPda);
+    const pos = await program.account.investorPosition.fetch(investorPositionPda);
+    if (!f.outstandingPrincipal.isZero() || !f.accruedInterest.isZero() ||
+        !f.totalPikAccrued.isZero() || !f.totalPendingRedemptions.isZero() || !pos.shareBalance.isZero()) {
+      throw new Error("Known investor or borrower obligations remain; closure refused");
+    }
+  }
 
   // ---------------------------------------------------------------------------
   // 17. close_facility
@@ -645,6 +715,12 @@ async function main() {
     console.log("");
     console.log("Final facility state:");
     console.log(facilityAccount);
+    if (!Object.prototype.hasOwnProperty.call(facilityAccount.status, "closed") ||
+        !facilityAccount.eventIndex.eq(new BN(eventIndex)) || !investorPositionAccount.shareBalance.isZero() ||
+        !facilityAccount.outstandingPrincipal.isZero() || !facilityAccount.accruedInterest.isZero() ||
+        !facilityAccount.totalPikAccrued.isZero() || !facilityAccount.totalPendingRedemptions.isZero()) {
+      throw new Error("Final state invariant failed");
+    }
 
     console.log("");
     console.log("Final investor position:");
@@ -654,7 +730,7 @@ async function main() {
     console.log("Final redemption request:");
     console.log(redemptionRequestAccount);
   } catch (err) {
-    console.log("Could not fetch final state:", err);
+    throw new Error(`Demo final state could not be verified: ${String(err)}`);
   }
 
   console.log("Demo complete.");
