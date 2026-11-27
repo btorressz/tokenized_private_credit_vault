@@ -342,16 +342,11 @@ pub fn process_close_facility(
         PrivateCreditError::FacilityClosed
     );
 
-    let can_close = facility.outstanding_principal == 0 || fully_resolved;
-    require!(can_close, PrivateCreditError::CannotCloseFacility);
-
-    if !fully_resolved {
-        require!(
-            facility.total_pending_redemptions == 0,
-            PrivateCreditError::CannotCloseFacility
-        );
-    }
-
+    // Caller flags cannot waive recorded debt or pending redemption claims.
+    let _ = fully_resolved;
+    require!(facility.outstanding_principal == 0 && facility.accrued_interest == 0
+        && facility.total_pik_accrued == 0 && facility.total_pending_redemptions == 0,
+        PrivateCreditError::CannotCloseFacility);
     facility.status = FacilityStatus::Closed;
     if facility.outstanding_principal == 0 && facility.accrued_interest == 0 {
         facility.payment_status = PaymentStatus::Repaid;

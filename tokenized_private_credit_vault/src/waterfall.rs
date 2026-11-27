@@ -5,6 +5,7 @@
 
 use anchor_lang::prelude::*;
 use crate::errors::PrivateCreditError;
+use crate::constants::MAX_FEE_BPS;
 use crate::math::{bps_of, checked_add, checked_sub};
 use crate::state::Facility;
 
@@ -29,6 +30,7 @@ pub fn calculate_repayment_waterfall(
 ) -> Result<WaterfallAllocation> {
     require!(payment_amount > 0, PrivateCreditError::AmountMustBeGreaterThanZero);
 
+    require!(servicing_fee_bps <= MAX_FEE_BPS, PrivateCreditError::InvalidRepaymentAllocation);
     let fee_amount = if servicing_fee_bps > 0 {
         bps_of(payment_amount, servicing_fee_bps)?
     } else {

@@ -6,6 +6,7 @@
 
 use anchor_lang::prelude::*;
 use crate::errors::PrivateCreditError;
+use crate::constants::MAX_FEE_BPS;
 use crate::math::{bps_of, checked_add, checked_sub};
 
 /// Recovery lifecycle status.
@@ -51,6 +52,8 @@ pub fn calculate_recovery_metrics(
     principal_written_down: u64,
     interest_written_down: u64,
 ) -> Result<RecoveryMetrics> {
+    let total_written_down = checked_add(principal_written_down, interest_written_down)?;
+    require!(checked_add(recovered_amount, total_written_down)? <= total_debt, PrivateCreditError::InvalidAccountingState);
     if total_debt == 0 {
         return Ok(RecoveryMetrics {
             total_debt_at_default: 0,
@@ -63,8 +66,7 @@ pub fn calculate_recovery_metrics(
         });
     }
 
-    let total_written_down = checked_add(principal_written_down, interest_written_down)?;
-    let net_realized_loss = total_written_down.min(total_debt);
+    let net_realized_loss = total_written_down;
 
     let recovery_rate_bps = ((recovered_amount as u128) * 10_000 / (total_debt as u128)) as u64;
     let loss_severity_bps = ((net_realized_loss as u128) * 10_000 / (total_debt as u128)) as u64;
@@ -111,6 +113,7 @@ pub fn allocate_recovery_proceeds(
     outstanding_interest: u64,
     outstanding_principal: u64,
 ) -> Result<(u64, u64, u64)> {
+    require!(recovery_fee_bps <= MAX_FEE_BPS, PrivateCreditError::InvalidRepaymentAllocation);
     let fee = bps_of(recovered_amount, recovery_fee_bps)?;
     let net_proceeds = checked_sub(recovered_amount, fee)?;
 
@@ -119,6 +122,7 @@ pub fn allocate_recovery_proceeds(
 
     let principal_covered = remaining_after_interest.min(outstanding_principal);
 
+    require!(checked_add(checked_add(fee, interest_covered)?, principal_covered)? == recovered_amount, PrivateCreditError::InvalidRepaymentAllocation);
     Ok((fee, interest_covered, principal_covered))
 }
 
