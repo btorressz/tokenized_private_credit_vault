@@ -234,7 +234,7 @@ pub enum CollateralStatus {
     Liquidated,
 }
 
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, InitSpace)]
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, InitSpace, Debug)]
 pub enum ValuationMode {
     /// Legacy fixed 1:1 simulated accounting (default; unchanged behavior).
     FixedOneToOne,
@@ -282,6 +282,7 @@ pub enum EventType {
     RecoveryCompleted,
     EligibilityUpdated,
     WaterfallApplied,
+    AdministrativeNote,
 }
 
 /// Deterministic risk classification (heuristic, not a statistical PD).
@@ -309,6 +310,47 @@ impl RiskClass {
             50..=69 => RiskClass::Elevated,
             70..=89 => RiskClass::High,
             _ => RiskClass::Critical,
+        }
+    }
+}
+
+// Test-only fixture; not an on-chain initializer.
+#[cfg(test)]
+impl Default for Facility {
+    fn default() -> Self {
+        Self {
+            facility_id: String::new(),
+            operator: Pubkey::default(),
+            borrower: Pubkey::default(),
+            stablecoin_mint: Pubkey::default(),
+            facility_size: 0,
+            interest_rate_bps: 0,
+            maturity_timestamp: 0,
+            max_drawdown_amount: 0,
+            minimum_collateral_coverage_bps: 0,
+            minimum_liquidity_reserve: 0,
+            collateral_description_hash: [0; 32],
+            status: FacilityStatus::Initialized,
+            payment_status: PaymentStatus::Current,
+            collateral_status: CollateralStatus::Unknown,
+            total_deposited: 0,
+            total_drawn: 0,
+            total_repaid: 0,
+            available_liquidity: 0,
+            outstanding_principal: 0,
+            accrued_interest: 0,
+            last_interest_accrual_timestamp: 0,
+            missed_payment_count: 0,
+            total_pending_redemptions: 0,
+            redemption_queue_index: 0,
+            pik_enabled: false,
+            total_pik_accrued: 0,
+            last_pik_timestamp: 0,
+            default_reason_code: 0,
+            event_index: 0,
+            created_at: 0,
+            updated_at: 0,
+            bump: 0,
         }
     }
 }

@@ -661,7 +661,7 @@ pub struct InitializeExtension<'info> {
 }
 
 #[derive(Accounts)]
-pub struct UpdateEligibility<'info> {
+pub struct InitializeEligibility<'info> {
     #[account(mut)]
     pub operator: Signer<'info>,
     /// CHECK: Target investor key.
@@ -672,7 +672,7 @@ pub struct UpdateEligibility<'info> {
     )]
     pub facility: Account<'info, Facility>,
     #[account(
-        init_if_needed,
+        init,
         payer = operator,
         seeds = [b"eligibility", facility.key().as_ref(), investor.key().as_ref()],
         bump,

@@ -29,7 +29,8 @@ pub fn calculate_gav(facility: &Facility) -> Result<u64> {
 /// Calculate Net Asset Value (NAV) = GAV - Credit Loss Adjustment.
 pub fn calculate_nav(facility: &Facility, credit_loss_adjustment: u64) -> Result<u64> {
     let gav = calculate_gav(facility)?;
-    Ok(gav.saturating_sub(credit_loss_adjustment))
+    require!(credit_loss_adjustment <= gav, PrivateCreditError::InvalidNavCalculation);
+    checked_sub(gav, credit_loss_adjustment)
 }
 
 /// Perform valuation update on VaultExtension.
@@ -41,9 +42,9 @@ pub fn update_vault_valuation(
     now: i64,
 ) -> Result<ValuationSnapshot> {
     let gav = calculate_gav(facility)?;
-    let nav = gav.saturating_sub(credit_loss_adjustment);
+    let nav = calculate_nav(facility, credit_loss_adjustment)?;
 
-    let price = if total_shares == 0 || extension.valuation_mode == ValuationMode::FixedOneToOne {
+    let price = if extension.valuation_mode == ValuationMode::FixedOneToOne {
         VALUATION_PRECISION
     } else {
         nav_per_share(nav, total_shares)?
@@ -72,10 +73,13 @@ pub fn deposit_amount_to_shares(
     extension_nav: u128,
     mode: ValuationMode,
 ) -> Result<u64> {
-    if mode == ValuationMode::FixedOneToOne || extension_nav == 0 {
+    if mode == ValuationMode::FixedOneToOne {
         Ok(amount)
     } else {
-        amount_to_shares(amount, extension_nav)
+        require!(extension_nav > 0, PrivateCreditError::InvalidShareValuation);
+        let shares = amount_to_shares(amount, extension_nav)?;
+        require!(amount == 0 || shares > 0, PrivateCreditError::InvalidShareValuation);
+        Ok(shares)
     }
 }
 
@@ -88,6 +92,7 @@ pub fn shares_to_value(
     if mode == ValuationMode::FixedOneToOne || extension_nav == 0 {
         Ok(shares)
     } else {
+        require!(extension_nav > 0, PrivateCreditError::InvalidShareValuation);
         shares_to_amount(shares, extension_nav)
     }
 }

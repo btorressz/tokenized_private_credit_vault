@@ -10,6 +10,15 @@ use crate::state::{
 };
 use crate::validation::{require_not_defaulted_or_closed, require_operator};
 
+pub fn accrue_to(facility: &mut Facility, now: i64) -> Result<u64> {
+    require!(now >= facility.last_interest_accrual_timestamp, PrivateCreditError::InvalidAccountingState);
+    let elapsed = now.checked_sub(facility.last_interest_accrual_timestamp).ok_or_else(|| error!(PrivateCreditError::MathOverflow))?;
+    let amount = calculate_interest_amount(facility.outstanding_principal, facility.interest_rate_bps, elapsed)?;
+    facility.accrued_interest = checked_add(facility.accrued_interest, amount)?;
+    facility.last_interest_accrual_timestamp = now;
+    Ok(amount)
+}
+
 pub fn process_accrue_interest(
     facility: &mut Account<Facility>,
     event_log: &mut Account<EventLog>,
@@ -21,17 +30,7 @@ pub fn process_accrue_interest(
     require_operator(facility, operator_key)?;
     require_not_defaulted_or_closed(facility)?;
 
-    let elapsed_seconds = now
-        .checked_sub(facility.last_interest_accrual_timestamp)
-        .ok_or_else(|| error!(PrivateCreditError::MathOverflow))?;
-    let interest_amount = calculate_interest_amount(
-        facility.outstanding_principal,
-        facility.interest_rate_bps,
-        elapsed_seconds,
-    )?;
-
-    facility.accrued_interest = checked_add(facility.accrued_interest, interest_amount)?;
-    facility.last_interest_accrual_timestamp = now;
+    let interest_amount = accrue_to(facility, now)?;
 
     write_event_log(
         event_log,
@@ -75,16 +74,18 @@ pub fn process_make_repayment(
         PrivateCreditError::FacilityClosed
     );
 
-    let interest_to_clear = interest_portion.min(facility.accrued_interest);
+    if facility.status != FacilityStatus::Defaulted { accrue_to(facility, now)?; }
+    require!(interest_portion <= facility.accrued_interest, PrivateCreditError::InvalidRepaymentAmount);
+    let interest_to_clear = interest_portion;
     facility.total_repaid = checked_add(facility.total_repaid, amount)?;
     facility.accrued_interest = checked_sub(facility.accrued_interest, interest_to_clear)?;
     facility.outstanding_principal = checked_sub(facility.outstanding_principal, principal_portion)?;
-    facility.available_liquidity = checked_add(facility.available_liquidity, amount)?;
+    facility.available_liquidity = crate::token_vault::cash_after(facility.available_liquidity, amount, crate::token_vault::SettlementKind::BorrowerRepayment, 0)?;
 
-    if facility.outstanding_principal == 0 && facility.accrued_interest == 0 {
+    if facility.status != FacilityStatus::Defaulted && facility.outstanding_principal == 0 && facility.accrued_interest == 0 && facility.total_pik_accrued == 0 {
         facility.status = FacilityStatus::Matured;
         facility.payment_status = PaymentStatus::Repaid;
-    } else if facility.status != FacilityStatus::Breached && facility.status != FacilityStatus::Defaulted {
+    } else if facility.status != FacilityStatus::Breached && facility.status != FacilityStatus::Defaulted && facility.status != FacilityStatus::Matured {
         facility.status = FacilityStatus::Performing;
         facility.payment_status = PaymentStatus::Current;
     }
@@ -133,6 +134,10 @@ pub fn process_record_missed_payment(
     require_operator(facility, operator_key)?;
     require_not_defaulted_or_closed(facility)?;
 
+    require!(facility.outstanding_principal > 0, PrivateCreditError::InvalidFacilityStatus);
+    let due = repayment_schedule.next_due_timestamp.checked_add(crate::constants::DEFAULT_GRACE_PERIOD_SECONDS).ok_or_else(|| error!(PrivateCreditError::MathOverflow))?;
+    require!(now >= due, PrivateCreditError::PaymentNotYetDue);
+    repayment_schedule.next_due_timestamp = repayment_schedule.next_due_timestamp.checked_add(THIRTY_DAYS_SECONDS).ok_or_else(|| error!(PrivateCreditError::MathOverflow))?;
     facility.missed_payment_count = facility
         .missed_payment_count
         .checked_add(1)
@@ -209,6 +214,7 @@ pub fn process_capitalize_pik(
         PrivateCreditError::AmountMustBeGreaterThanZero
     );
 
+    accrue_to(facility, now)?;
     let capitalized_amount = facility.total_pik_accrued;
     facility.outstanding_principal = checked_add(facility.outstanding_principal, capitalized_amount)?;
     facility.total_pik_accrued = 0;

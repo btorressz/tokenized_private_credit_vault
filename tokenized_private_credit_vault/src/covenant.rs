@@ -37,19 +37,20 @@ pub fn process_update_covenant_state(
     covenant.minimum_liquidity_bps = minimum_liquidity_bps;
     covenant.reporting_current = reporting_current;
     covenant.last_report_timestamp = now;
+    let breached = breached || covenant.collateral_impaired;
     covenant.breached = breached;
     covenant.updated_by = operator_key;
     covenant.updated_at = now;
 
     let event_type = if breached {
         covenant.breach_reason = breach_reason;
-        if facility.status != FacilityStatus::Defaulted {
+        if !matches!(facility.status, FacilityStatus::Defaulted | FacilityStatus::Matured | FacilityStatus::Initialized) {
             facility.status = FacilityStatus::Breached;
         }
         EventType::CovenantBreached
     } else {
         covenant.breach_reason = String::new();
-        if facility.status == FacilityStatus::Breached {
+        if facility.status == FacilityStatus::Breached && now < facility.maturity_timestamp {
             facility.status = if facility.outstanding_principal > 0 {
                 FacilityStatus::Performing
             } else {

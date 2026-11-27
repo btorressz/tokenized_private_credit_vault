@@ -49,7 +49,7 @@ pub fn process_update_collateral_status(
             covenant.breach_reason = "Collateral impaired".to_string();
             note_code = 1;
         }
-        if facility.status != FacilityStatus::Defaulted {
+        if !matches!(facility.status, FacilityStatus::Defaulted | FacilityStatus::Matured | FacilityStatus::Initialized) {
             facility.status = FacilityStatus::Breached;
         }
     }

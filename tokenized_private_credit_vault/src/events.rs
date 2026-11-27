@@ -32,3 +32,11 @@ pub fn write_event_log(
     facility.updated_at = now;
     Ok(())
 }
+
+/// Full-width queue index accompanying the legacy u16 note code.
+#[event]
+pub struct RedemptionQueueEvidence {
+    pub facility: Pubkey,
+    pub event_index: u64,
+    pub queue_index: u64,
+}

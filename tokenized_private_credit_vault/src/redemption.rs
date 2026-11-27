@@ -90,6 +90,7 @@ pub fn process_request_redemption<'info>(
         facility.redemption_queue_index = checked_add(facility.redemption_queue_index, 1)?;
     }
 
+    emit!(crate::events::RedemptionQueueEvidence { facility: facility.key(), event_index, queue_index: request.queue_index });
     write_event_log(
         event_log,
         facility,
@@ -97,7 +98,7 @@ pub fn process_request_redemption<'info>(
         EventType::RedemptionRequested,
         investor_key,
         amount,
-        request.queue_index as u16,
+        u16::try_from(request.queue_index).unwrap_or(u16::MAX),
         event_bump,
         now,
     )?;
@@ -162,6 +163,7 @@ pub fn process_cancel_redemption<'info>(
 
     facility.total_pending_redemptions = checked_sub(facility.total_pending_redemptions, remaining_amount)?;
 
+    emit!(crate::events::RedemptionQueueEvidence { facility: facility.key(), event_index, queue_index: request.queue_index });
     write_event_log(
         event_log,
         facility,
@@ -169,7 +171,7 @@ pub fn process_cancel_redemption<'info>(
         EventType::RedemptionCancelled,
         investor_key,
         remaining_amount,
-        request.queue_index as u16,
+        u16::try_from(request.queue_index).unwrap_or(u16::MAX),
         event_bump,
         now,
     )?;
@@ -221,11 +223,8 @@ pub fn process_process_redemption<'info>(
     require!(amount <= remaining_request, PrivateCreditError::ExceedsInvestorBalance);
     require!(amount <= facility.available_liquidity, PrivateCreditError::ExceedsAvailableLiquidity);
 
-    let post_redemption_liquidity = checked_sub(facility.available_liquidity, amount)?;
-    require!(
-        post_redemption_liquidity >= facility.minimum_liquidity_reserve,
-        PrivateCreditError::ExceedsAvailableLiquidity
-    );
+    let reserve = if facility.status == crate::state::FacilityStatus::Matured && facility.outstanding_principal == 0 && facility.accrued_interest == 0 && facility.total_pik_accrued == 0 { 0 } else { facility.minimum_liquidity_reserve };
+    let post_redemption_liquidity = crate::token_vault::cash_after(facility.available_liquidity, amount, crate::token_vault::SettlementKind::InvestorRedemption, reserve)?;
     require!(amount <= position.share_balance, PrivateCreditError::ExceedsInvestorBalance);
     require!(amount <= position.pending_redemption_amount, PrivateCreditError::ExceedsInvestorBalance);
 
@@ -258,6 +257,7 @@ pub fn process_process_redemption<'info>(
     facility.available_liquidity = post_redemption_liquidity;
     facility.total_pending_redemptions = checked_sub(facility.total_pending_redemptions, amount)?;
 
+    emit!(crate::events::RedemptionQueueEvidence { facility: facility.key(), event_index, queue_index: request.queue_index });
     write_event_log(
         event_log,
         facility,
@@ -265,7 +265,7 @@ pub fn process_process_redemption<'info>(
         EventType::RedemptionProcessed,
         operator_key,
         amount,
-        request.queue_index as u16,
+        u16::try_from(request.queue_index).unwrap_or(u16::MAX),
         event_bump,
         now,
     )?;

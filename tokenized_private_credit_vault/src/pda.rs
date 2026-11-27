@@ -14,21 +14,22 @@ pub fn create_pda_account<'info>(
     space: usize,
     signer_seeds: &[&[u8]],
 ) -> Result<()> {
-    if account_info.data_is_empty() {
-        let rent = Rent::get()?;
-        let lamports = rent.minimum_balance(space);
-        let ix = system_instruction::create_account(
-            payer_info.key,
-            account_info.key,
-            lamports,
-            space as u64,
-            &crate::ID,
-        );
-        invoke_signed(
-            &ix,
-            &[payer_info.clone(), account_info.clone(), system_program_info.clone()],
-            &[signer_seeds],
-        )?;
+    require!(account_info.data_is_empty(), PrivateCreditError::InvalidAccountingState);
+    require_keys_eq!(*account_info.owner, anchor_lang::system_program::ID, PrivateCreditError::Unauthorized);
+    let rent = Rent::get()?.minimum_balance(space);
+    let existing = account_info.lamports();
+    if existing == 0 {
+        let ix = system_instruction::create_account(payer_info.key, account_info.key, rent, space as u64, &crate::ID);
+        invoke_signed(&ix, &[payer_info.clone(), account_info.clone(), system_program_info.clone()], &[signer_seeds])?;
+    } else {
+        if existing < rent {
+            let ix = system_instruction::transfer(payer_info.key, account_info.key, rent - existing);
+            invoke_signed(&ix, &[payer_info.clone(), account_info.clone(), system_program_info.clone()], &[])?;
+        }
+        let ix = system_instruction::allocate(account_info.key, space as u64);
+        invoke_signed(&ix, &[account_info.clone(), system_program_info.clone()], &[signer_seeds])?;
+        let ix = system_instruction::assign(account_info.key, &crate::ID);
+        invoke_signed(&ix, &[account_info.clone(), system_program_info.clone()], &[signer_seeds])?;
     }
     Ok(())
 }
@@ -65,7 +66,11 @@ pub fn load_or_init_investor_position<'info>(
         save_investor_position(account_info, &position)?;
         Ok(position)
     } else {
-        load_existing_investor_position(account_info)
+        let position = load_existing_investor_position(account_info)?;
+        require_keys_eq!(position.facility, *facility, PrivateCreditError::Unauthorized);
+        require_keys_eq!(position.investor, *investor, PrivateCreditError::Unauthorized);
+        require!(position.bump == bump, PrivateCreditError::Unauthorized);
+        Ok(position)
     }
 }
 
@@ -116,7 +121,11 @@ pub fn load_or_init_redemption_request<'info>(
         save_redemption_request(account_info, &request)?;
         Ok((request, true))
     } else {
-        Ok((load_existing_redemption_request(account_info)?, false))
+        let request = load_existing_redemption_request(account_info)?;
+        require_keys_eq!(request.facility, *facility, PrivateCreditError::Unauthorized);
+        require_keys_eq!(request.investor, *investor, PrivateCreditError::Unauthorized);
+        require!(request.bump == bump, PrivateCreditError::Unauthorized);
+        Ok((request, false))
     }
 }
 
