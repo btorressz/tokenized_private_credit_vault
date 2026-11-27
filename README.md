@@ -60,12 +60,15 @@ For simplicity, this proof of concept uses **simulated stablecoin accounting**. 
 
 ## Program Scope
 
-This is a single-file Anchor program intended for Solana Playground.
+This is a modular Anchor/Rust MVP intended for Solana Playground. Following [PR #1](https://github.com/btorressz/tokenized_private_credit_vault/pull/1), the program has 20 Rust source files (including `lib.rs`), 19 declared source modules, and retains the original 20 public instruction signatures. The program entry point is approximately 482 lines, below the project's 2,300-line editor constraint.
+
+The repository now separates the original instruction execution paths from reusable financial research engines. Source availability and module registration do not imply that every helper is exposed as an on-chain instruction or that the current revision has passed compilation.
 
 Included:
 
-* `lib.rs`
-* Playground-compatible `client.ts`
+* Modular Rust source tree and Anchor program entry point (`lib.rs`)
+* Playground-compatible `client/client.ts` and TypeScript lifecycle test (`tests/anchor.test.ts`)
+* Deterministic risk, NAV, waterfall, recovery, permission and simulated settlement helpers
 * PDA state accounts
 * Lifecycle state machine
 * Event log accounts
@@ -85,6 +88,37 @@ Not included:
 * Securities compliance logic
 * Production deployment setup
 
+## Modular Architecture and Implementation Status
+
+| File | Responsibility | Current scope |
+| --- | --- | --- |
+| `lib.rs` | Anchor entry point, instruction dispatch, deposit and drawdown orchestration | Original 20 instructions retained |
+| `account.rs` | Anchor account contexts, signers, PDA constraints | Original contexts; extension contexts prepared |
+| `state.rs` | Facility, investor, repayment, covenant, redemption and event state | Original layouts plus extension account types |
+| `constants.rs` | Protocol bounds, time periods and fixed-point constants | Shared foundation |
+| `errors.rs` | Custom Anchor errors | Shared foundation |
+| `math.rs` | Checked arithmetic, interest, ratios, valuation and allocation helpers | Shared foundation |
+| `validation.rs` | Authorization and lifecycle guards | Shared foundation |
+| `pda.rs` | Manual PDA creation, ownership checks, serialization | Core instruction support |
+| `events.rs` | Sequential event snapshots and full-width redemption queue evidence | Core instruction support |
+| `facility.rs` | Initialization, activation, maturity, default, metadata and closure | Delegated instruction logic |
+| `accounting.rs` | Interest, repayment, missed payments and PIK | Delegated instruction logic |
+| `covenant.rs` | Operator-reported covenant monitoring | Delegated instruction logic |
+| `collateral.rs` | Reported collateral value, coverage and impairment | Delegated instruction logic |
+| `redemption.rs` | Redemption requests, cancellation, processing and freezes | Delegated instruction logic; strict FIFO deferred |
+| `risk.rs` | Explainable heuristic credit risk, freshness and haircut calculations | Research helpers; not an enforced risk engine |
+| `valuation.rs` | GAV, NAV, share-price and conversion calculations | Research helpers; NAV execution disabled |
+| `waterfall.rs` | Fee-bounded repayment allocation and reconciliation | Research helpers; not wired into repayment execution |
+| `recovery.rs` | Recovery metrics, write-down arithmetic, allocation and transition guards | Research helpers; recovery administration not exposed |
+| `compliance.rs` | Eligibility checks and position status restoration | Research helpers; permissioned mode and unfreeze instructions not exposed |
+| `token_vault.rs` | Pure simulated settlement arithmetic and denomination validation | Used for core cash updates; real SPL mode rejected |
+
+### Current financial execution boundaries
+
+The original public instructions use fixed 1:1 simulated share accounting. The new modules are registered in the source tree, but advanced NAV execution, configurable payment waterfalls, recovery administration, permissioned facility activation, strict FIFO enforcement and extension management are not yet enabled as complete on-chain workflows. The permission module requires canonical authenticated records before it can safely be integrated; missing evidence must not bypass permission checks. Risk scores are deterministic heuristics, not calibrated probabilities of default. Collateral and covenant inputs remain operator-reported.
+
+The modular integration adds source-level safeguards for accrual before principal changes, excess-interest rejection, missed-payment timing, liquidity reserves, prefunded PDAs, restricted administrative events and full-width queue evidence. These changes are not a substitute for executed regression tests or a security audit. See [MVP integration notes](MVP_INTEGRATION_NOTES.md) for remaining boundaries.
+
 ## PDA Accounts
 
 The program uses deterministic PDA accounts for facility state, investor state, repayment tracking, covenant monitoring, redemption requests, and event logs.
@@ -97,6 +131,15 @@ The program uses deterministic PDA accounts for facility state, investor state, 
 | `covenant_state`     | `["covenant", facility.key()]`                   | Tracks covenant and collateral health    |
 | `redemption_request` | `["redemption", facility.key(), investor.key()]` | Tracks investor redemption queue request |
 | `event_log`          | `["event", facility.key(), event_index]`         | Stores auditable event snapshots         |
+
+The six original account layouts remain the compatibility baseline. Two additional account types are defined for future instruction integration:
+
+| Extension account | Seeds | Purpose |
+| --- | --- | --- |
+| `VaultExtension` | `["extension", facility.key()]` | Proposed permission mode, fees, FIFO pointer, grace period, valuation and recovery state |
+| `InvestorEligibility` | `["eligibility", facility.key(), investor.key()]` | Proposed eligibility flag, expiry and administrative evidence |
+
+These extension types and preparation contexts do not establish an active permissioned or NAV-based facility mode. The current program does not expose their initialization or administration as public instructions.
 
 ## Main Accounts
 
@@ -317,6 +360,8 @@ Checks:
 * Amount does not exceed available liquidity
 * Total drawn does not exceed max drawdown
 * Total drawn does not exceed facility size
+* Post-drawdown simulated cash respects the minimum liquidity reserve
+* Interest is accrued against the old principal before increasing principal
 
 Updates:
 
@@ -342,7 +387,7 @@ Updates:
 * Accrued interest
 * Last interest accrual timestamp
 
-This is only a simplified placeholder. A real system would need defined day-count conventions, compounding rules, payment waterfalls, fees, and reporting logic.
+This uses checked integer arithmetic and a simplified 365-day denominator. Accrual is also applied before principal-changing drawdowns, non-defaulted repayments and PIK capitalization. Fractional interest carry and comprehensive day-count and compounding rules remain follow-up work.
 
 ### `make_repayment`
 
@@ -353,7 +398,8 @@ Tracks:
 * Total repayment amount
 * Principal portion
 * Interest portion
-* Whether scheduled payment was satisfied
+* Caller-reported scheduled payment satisfaction (legacy MVP behavior; deterministic contractual schedule validation remains pending)
+* Principal and interest portions must reconcile with the accepted amount and not exceed their recorded obligations
 
 Updates:
 
@@ -365,7 +411,7 @@ Updates:
 * Facility status
 * Repayment schedule
 
-If principal and accrued interest are fully repaid, the facility can be marked as `Matured`.
+If principal, accrued interest and uncapitalized PIK are fully repaid, a non-defaulted facility can be marked as `Matured`. Ordinary repayment does not clear default status. The configurable waterfall helper is not yet wired into this instruction.
 
 ### `record_missed_payment`
 
@@ -377,7 +423,7 @@ Updates:
 * Payment status
 * Repayment schedule
 
-If missed payments exceed the threshold, the facility moves to `Defaulted`.
+Missed-payment recording requires outstanding principal and a due date past the configured default grace period. The next due date advances by one payment period. At the configured threshold of two missed payments, the facility moves to `Defaulted`. A complete contractual schedule and payment-period reconciliation are still required.
 
 ### `update_covenant_state`
 
@@ -393,7 +439,7 @@ Tracks:
 * Breach status
 * Breach reason
 
-If a covenant is breached, the facility moves to `Breached`.
+A reported breach can move an eligible facility to `Breached`; the update cannot reactivate a matured or defaulted facility. Collateral impairment is retained as a breach condition. Full contractual threshold evaluation and independent reporting verification remain future work.
 
 ### `toggle_pik`
 
@@ -407,7 +453,7 @@ Tracks:
 * Total PIK accrued
 * Last PIK timestamp
 
-PIK cannot be toggled after default or close.
+PIK cannot be toggled after default or close. The current PIK accrual amount is still operator-supplied; deterministic contractual PIK accrual and reconciliation are not yet implemented.
 
 ### `capitalize_pik`
 
@@ -453,7 +499,7 @@ Updates:
 * Investor pending redemption amount
 * Facility total pending redemptions
 
-Redemption does not instantly withdraw funds. It enters a queue and must be processed by the operator.
+Redemption does not instantly withdraw funds. It records a queue index and must be processed by the operator. Strict FIFO priority enforcement and protection against new amounts inheriting an older queue position remain future integration work.
 
 ### `cancel_redemption`
 
@@ -487,7 +533,7 @@ Checks:
 * Amount does not exceed pending request
 * Amount does not exceed investor balance
 * Amount does not exceed available liquidity
-* Post-redemption liquidity does not fall below the minimum liquidity reserve
+* Post-redemption liquidity does not fall below the minimum liquidity reserve, except for the implemented debt-free matured-facility settlement case
 
 Updates:
 
@@ -511,7 +557,7 @@ Updates:
 * Investor position status to `Frozen`
 * Pending redemption request status to `Frozen`, if one exists
 
-This models compliance-style controls, transfer restrictions, investor eligibility issues, legal freezes, or risk controls.
+This models a simulated position restriction, not legal compliance. A status restoration helper now exists in `compliance.rs`, but an authorized public unfreeze instruction is not yet exposed.
 
 ### `mark_matured`
 
@@ -560,18 +606,11 @@ This demonstrates governance and lifecycle-aware term update logic.
 
 Allows the operator to close the facility.
 
-The facility can be closed if:
-
-* Outstanding principal is zero, or
-* The facility is marked fully resolved
-
-If not fully resolved, pending redemptions must be zero.
+Closure now requires zero outstanding principal, accrued interest, uncapitalized PIK and pending redemptions. The legacy `fully_resolved` argument remains in the public signature for compatibility but cannot waive these checks. Aggregate unredeemed share supply is not yet tracked; complete investor settlement invariants remain a required follow-up.
 
 ### `append_event_log`
 
-Allows the operator to append a manual event log record.
-
-This is useful for demo and audit trail testing.
+Allows the operator to append an `AdministrativeNote` event only. Arbitrary manual financial event types are rejected so an administrative annotation cannot impersonate a deposit, repayment or other financial transaction.
 
 ## Enums
 
@@ -654,7 +693,19 @@ FacilityMatured
 FacilityDefaulted
 TermsUpdated
 FacilityClosed
+InvestorUnfrozen
+RiskAssessed
+ValuationUpdated
+RecoveryProceedsRecorded
+DebtWrittenDown
+FacilityRestructured
+RecoveryCompleted
+EligibilityUpdated
+WaterfallApplied
+AdministrativeNote
 ```
+
+The additional event variants reserve audit vocabulary for future integrated workflows; their presence does not mean those workflows are executable. `RedemptionQueueEvidence` is a supplementary Anchor event carrying the full `u64` queue index, alongside the legacy `u16` note field.
 
 ## Simulated Accounting Model
 
@@ -674,7 +725,7 @@ Instead, it updates accounting fields such as:
 
 This keeps the project simple and suitable for Solana Playground.
 
-A production version would replace simulated accounting with SPL Token vault transfers.
+The `token_vault.rs` module computes checked cash deltas without maintaining a second ledger. Existing instruction paths remain responsible for the authoritative balance update. `SimulatedAccounting` is the only supported settlement mode; `FutureSplTokenSettlement` is explicitly rejected by the settlement preview helper. Mint keys identify simulated denominations, not verified token accounts. A production version would require a separately implemented, reviewed SPL Token custody and settlement architecture.
 
 ## Event Logging
 
@@ -706,13 +757,11 @@ This creates a simple on-chain audit trail.
 
 Go to Solana Playground and create a new Anchor project.
 
-### 2. Replace `lib.rs`
+### 2. Import the complete modular source tree
 
-Paste the program code into:
+Import or synchronize the repository's [`tokenized_private_credit_vault`](tokenized_private_credit_vault/) project directory into an Anchor workspace. If manually copying files, copy **all 20 Rust files** from `tokenized_private_credit_vault/src/` into the workspace's program source directory, preserving their names. Copying `lib.rs` alone will leave unresolved modules.
 
-```text
-programs/<your-program-name>/src/lib.rs
-```
+Back up local Playground changes before refreshing or reimporting from GitHub. The exported source contains a public placeholder in `declare_id!`; replace it with the actual program public key assigned by your Playground workspace. The placeholder is not a deployed program or usable keypair.
 
 ### 3. Build
 
@@ -722,15 +771,9 @@ Click:
 Build
 ```
 
-### 4. Deploy
+### 4. Verify before any devnet experiment
 
-Click:
-
-```text
-Deploy
-```
-
-Wait until deployment finishes.
+The current modular revision has not been verified with an executed Anchor build or regression suite. Resolve compilation errors, inspect the generated IDL, and adapt and run the client and integration tests against the stricter accounting checks first. Only after successful verification should you consider a devnet-only deployment using test data. Do not deploy to mainnet or use real assets.
 
 ### 5. Run the Client
 
@@ -764,7 +807,7 @@ Attempt to load a program that does not exist
 
 ## Example Demo Flow
 
-The Playground client demonstrates this sequence:
+The existing Playground client describes this demonstration sequence. It predates the stricter modular accounting and may need fixture changes before every step succeeds:
 
 ```text
 initializeFacility
@@ -876,8 +919,13 @@ This program intentionally simplifies many things:
 * No legal enforcement
 * No real repayment schedule calendar
 * No compounding interest model
-* No multi-investor waterfall allocation
+* No integrated multi-investor waterfall or dynamic NAV-based execution
+* No active permissioned facility or public unfreeze/recovery administration
+* No strict FIFO enforcement or aggregate unredeemed share supply invariant
+* No independently verified covenant or collateral data
+* No deterministic contractual PIK calculation or complete repayment-period reconciliation
 * No production admin controls
+* Modular build and regression testing remain unverified
 
 These limitations are intentional because the goal is a clean proof of concept.
 
@@ -894,28 +942,66 @@ Potential next steps:
 * Add off-chain report hash submissions
 * Add document hash verification
 * Add role-based permissions
-* Add compliance allowlist
+* Integrate the existing eligibility and permission helpers with authenticated canonical accounts
 * Add redemption gates by epoch
-* Add default recovery workflow
+* Integrate the existing default recovery helpers into authorized on-chain workflows
 * Add liquidation workflow
-* Add TypeScript tests
+* Update the existing TypeScript lifecycle test and add regression, negative-path and invariant tests
 * Add dashboard indexer
 * Add event indexer
 * Add multi-facility operator dashboard
 
 ## Repository Structure
 
-For Solana Playground, the project can stay minimal:
+The current GitHub export is organized as follows:
 
 ```text
 .
-├── programs/
-│   └── tokenized-private-credit-vault/
-│       └── src/
-│           └── lib.rs
-├── client.ts
-└── README.md
+├── LICENSE
+├── README.md
+├── MVP_INTEGRATION_NOTES.md
+└── tokenized_private_credit_vault/
+    ├── client/
+    │   └── client.ts
+    ├── src/
+    │   ├── account.rs
+    │   ├── accounting.rs
+    │   ├── collateral.rs
+    │   ├── compliance.rs
+    │   ├── constants.rs
+    │   ├── covenant.rs
+    │   ├── errors.rs
+    │   ├── events.rs
+    │   ├── facility.rs
+    │   ├── lib.rs
+    │   ├── math.rs
+    │   ├── pda.rs
+    │   ├── recovery.rs
+    │   ├── redemption.rs
+    │   ├── risk.rs
+    │   ├── state.rs
+    │   ├── token_vault.rs
+    │   ├── validation.rs
+    │   ├── valuation.rs
+    │   └── waterfall.rs
+    └── tests/
+        └── anchor.test.ts
 ```
+
+## Verification Status and Next Milestones
+
+| Milestone | Status |
+| --- | --- |
+| 20 Rust source files and module declarations | Present on main |
+| Original 20 public instruction signatures | Retained in source |
+| Simulated-only settlement | Implemented in source |
+| Rust unit tests | Defined, execution unverified |
+| TypeScript client and lifecycle tests | Present; updated behavior requires regression testing |
+| Anchor build and generated IDL verification | Pending |
+| Advanced financial and permission execution paths | Partial; integration pending |
+| Security and economic audit | Not performed |
+
+The GitHub export does not currently include a Cargo.toml or Anchor.toml. Use an appropriately configured Playground Anchor workspace for compilation, or establish a reproducible local build configuration before claiming a passing build. The next milestone is a verified build, instruction/account compatibility review, and full financial regression testing; then integrate extension-based features incrementally. See [MVP_INTEGRATION_NOTES.md](MVP_INTEGRATION_NOTES.md).
 
 ## Summary
 
